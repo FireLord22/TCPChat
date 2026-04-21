@@ -80,38 +80,109 @@ namespace ChatClient
         }
 
         // ── Команды ─────────────────────────────────────────────────────────────
-        public void SendPm(string to, string text)        => Send($"/pm {to} {text}");
-        public void CreateGroup(string name)              => Send($"/creategroup {name}");
-        public void InviteToGroup(string gid, string nick)=> Send($"/invite {gid} {nick}");
-        public void AcceptInvite(string gid)              => Send($"/acceptinvite {gid}");
-        public void DeclineInvite(string gid)             => Send($"/declineinvite {gid}");
+        public void SendPm(string to, string text) => Send($"/pm {to} {text}");
+        public void CreateGroup(string name) => Send($"/creategroup {name}");
+        public void InviteToGroup(string gid, string nick) => Send($"/invite {gid} {nick}");
+        public void AcceptInvite(string gid) => Send($"/acceptinvite {gid}");
+        public void DeclineInvite(string gid) => Send($"/declineinvite {gid}");
         public void SendGroupMsg(string gid, string text) => Send($"/groupmsg {gid} {text}");
-        public void RequestUsers()                        => Send("/users");
+        public void RequestUsers() => Send("/users");
 
         public void Disconnect()
         {
-            
+            if (!_connected) return;
+            _connected = false;
+            try { _wr?.WriteLine("/quit"); } catch { }
+            Close();
         }
 
         private void Close()
         {
-            
+            try { _rd?.Close(); } catch { }
+            try { _wr?.Close(); } catch { }
+            try { _tcp?.Close(); } catch { }
         }
 
         private void Send(string line)
         {
-            
+            if (!_connected) return;
+            try { _wr.WriteLine(line); }
+            catch (Exception ex) { OnSystemMessage?.Invoke($"Ошибка: {ex.Message}"); }
         }
 
-       
+        // ── Чтение ───────────────────────────────────────────────────────────────
         private void ReadLoop()
         {
-            
+            try
+            {
+                string line;
+                while (_connected && (line = _rd.ReadLine()) != null)
+                    Parse(line);
+            }
+            catch (IOException) { }
+            catch (Exception ex) { OnSystemMessage?.Invoke($"Ошибка: {ex.Message}"); }
+            finally { _connected = false; OnDisconnected?.Invoke(); }
         }
 
         private void Parse(string line)
         {
-            
+            if (line.StartsWith("SYSTEM:"))
+                OnSystemMessage?.Invoke(line.Substring(7));
+            else if (line.StartsWith("USERS:"))
+            {
+                var p = line.Substring(6);
+                OnUsersUpdated?.Invoke(string.IsNullOrEmpty(p) ? new string[0] : p.Split(','));
+            }
+            else if (line.StartsWith("PM:"))
+            {
+                var rest = line.Substring(3); int i = rest.IndexOf(':');
+                if (i > 0) OnPrivateMessage?.Invoke(rest.Substring(0, i), rest.Substring(i + 1));
+            }
+            else if (line.StartsWith("PM_SENT:"))
+            {
+                var rest = line.Substring(8); int i = rest.IndexOf(':');
+                if (i > 0) OnPrivateMessageSent?.Invoke(rest.Substring(0, i), rest.Substring(i + 1));
+            }
+            else if (line.StartsWith("GROUP_CREATED:"))
+            {
+                var p = line.Substring("GROUP_CREATED:".Length).Split(new[] { ':' }, 2);
+                if (p.Length == 2) OnGroupCreated?.Invoke(p[0], p[1]);
+            }
+            else if (line.StartsWith("INVITE:"))
+            {
+                var p = line.Substring("INVITE:".Length).Split(new[] { ':' }, 3);
+                if (p.Length == 3) OnInviteReceived?.Invoke(p[0], p[1], p[2]);
+            }
+            else if (line.StartsWith("INVITE_ACCEPTED:"))
+            {
+                var p = line.Substring("INVITE_ACCEPTED:".Length).Split(new[] { ':' }, 4);
+                if (p.Length == 4) OnInviteAccepted?.Invoke(p[0], p[1], p[2], p[3].Split(','));
+            }
+            else if (line.StartsWith("GROUPMSG:"))
+            {
+                var p = line.Substring("GROUPMSG:".Length).Split(new[] { ':' }, 3);
+                if (p.Length == 3) OnGroupMessage?.Invoke(p[0], p[1], p[2]);
+            }
+            else if (line.StartsWith("CENSORED:"))
+                OnCensored?.Invoke();
+            else if (line.StartsWith("HISTORY_PM:"))
+            {
+                var rest = line.Substring("HISTORY_PM:".Length);
+                int i1 = rest.IndexOf(':'); if (i1 < 0) return;
+                string peer = rest.Substring(0, i1);
+                var tail = rest.Substring(i1 + 1);
+                int i2 = tail.IndexOf(':'); if (i2 < 0) return;
+                OnHistoryPm?.Invoke(peer, tail.Substring(0, i2), tail.Substring(i2 + 1));
+            }
+            else if (line.StartsWith("HISTORY_GROUP:"))
+            {
+                var rest = line.Substring("HISTORY_GROUP:".Length);
+                int i1 = rest.IndexOf(':'); if (i1 < 0) return;
+                string gid = rest.Substring(0, i1);
+                var tail = rest.Substring(i1 + 1);
+                int i2 = tail.IndexOf(':'); if (i2 < 0) return;
+                OnHistoryGroup?.Invoke(gid, tail.Substring(0, i2), tail.Substring(i2 + 1));
+            }
         }
     }
 }
