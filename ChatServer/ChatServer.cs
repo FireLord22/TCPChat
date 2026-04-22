@@ -72,6 +72,29 @@ namespace ChatServer
             }
         }
 
+        // ── Фильтр мата ────────────────────────────────────────────────────────
+        private static readonly string[] BadRoots =
+        {
+            "бля","блядь","блядин","ёб","еб",
+            "хуй","хуя","хуе","хуйн","пизд",
+            "пидор","пидар","мудак","мудил","сук[аи]",
+            "залуп","манд","шлюх",
+            "fuck","shit","bitch","cunt","dick","cock","pussy","asshole"
+        };
+        private static readonly string WC = @"[а-яёА-ЯЁa-zA-Z]*";
+
+        private struct FR { public string Text; public bool Censored; }
+
+        private FR Filter(string t)
+        {
+            bool hit = false;
+            if (CensorEnabled)
+                foreach (var r in BadRoots)
+                    t = Regex.Replace(t, WC + r + WC, m => { hit = true; return "Гойда!"; },
+                        RegexOptions.IgnoreCase);
+            return new FR { Text = t, Censored = hit };
+        }
+
         private static string PmKey(string a, string b)
         {
             var p = new[] { a, b }; Array.Sort(p, StringComparer.OrdinalIgnoreCase);
@@ -225,6 +248,19 @@ namespace ChatServer
                 SendInitialData(nick, wr);
 
                 // ── Основной цикл ──────────────────────────────────────────────
+                string line;
+                while ((line = rd.ReadLine()) != null)
+                {
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    if (line.StartsWith("/pm ")) HandlePm(nick, wr, line);
+                    else if (line.StartsWith("/creategroup ")) HandleCreateGroup(nick, wr, line);
+                    else if (line.StartsWith("/invite ")) HandleInvite(nick, wr, line);
+                    else if (line.StartsWith("/acceptinvite ")) HandleAcceptInvite(nick, line);
+                    else if (line.StartsWith("/declineinvite ")) HandleDeclineInvite(nick, line);
+                    else if (line.StartsWith("/groupmsg ")) HandleGroupMsg(nick, line);
+                    else if (line.StartsWith("/users")) SendUserList(wr);
+                    else if (line.StartsWith("/quit")) break;
+                }
             }
             catch (IOException) { }
             catch (Exception ex) { Log($"Ошибка [{nick ?? "?"}]: {ex.Message}"); }
@@ -337,6 +373,29 @@ namespace ChatServer
         }
 
         // ── Личные сообщения ────────────────────────────────────────────────────
+        private void HandlePm(string sender, StreamWriter senderWr, string line)
+        {
+            var p = line.Substring(4).Split(new[] { ' ' }, 2);
+            if (p.Length < 2) return;
+            string target = p[0].Trim();
+            var fr = Filter(p[1].Trim());
+            string text = fr.Text;
+            string record = $"{sender}:{text}";
+            string key = PmKey(sender, target);
+
+            lock (_lock)
+            {
+                if (!_pmHistory.ContainsKey(key)) _pmHistory[key] = new List<string>();
+                _pmHistory[key].Add(record);
+
+                if (_clients.TryGetValue(target, out var tw))
+                    try { tw.WriteLine($"PM:{sender}:{text}"); } catch { }
+                try { senderWr.WriteLine($"PM_SENT:{target}:{text}"); } catch { }
+                if (fr.Censored)
+                    try { senderWr.WriteLine("CENSORED:"); } catch { }
+            }
+            AppendPmHistory(key, record);
+        }
 
         // ── Создание группы ─────────────────────────────────────────────────────
         private void HandleCreateGroup(string creator, StreamWriter wr, string line)
@@ -408,6 +467,28 @@ namespace ChatServer
             }
         }
 
+        // ── Сообщение в группу ──────────────────────────────────────────────────
+        private void HandleGroupMsg(string sender, string line)
+        {
+            var p = line.Substring("/groupmsg ".Length).Split(new[] { ' ' }, 2);
+            if (p.Length < 2) return;
+            string gid = p[0].Trim();
+            var fr = Filter(p[1].Trim());
+            string text = fr.Text;
+            string record = $"{sender}:{text}";
+            lock (_lock)
+            {
+                if (!_groups.TryGetValue(gid, out var g) || !g.Members.Contains(sender)) return;
+                g.History.Add(record);
+                foreach (var m in g.Members)
+                    if (_clients.TryGetValue(m, out var w))
+                        try { w.WriteLine($"GROUPMSG:{gid}:{sender}:{text}"); } catch { }
+                if (fr.Censored && _clients.TryGetValue(sender, out var sw))
+                    try { sw.WriteLine("CENSORED:"); } catch { }
+            }
+            AppendGroupHistory(gid, record);
+            OnMessageReceived?.Invoke(sender, text);
+        }
 
         // ── Утилиты ─────────────────────────────────────────────────────────────
         private void SendUserList(StreamWriter wr)
